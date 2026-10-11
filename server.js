@@ -1,181 +1,115 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { Pool } = require('pg');
-const nodemailer = require('nodemailer');
 
 const app = express();
-app.use(cors());
+const PORT = process.env.PORT || 3000;
+
+// S6: Restringir CORS al origen del frontend
+app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
 app.use(express.json());
 
-// Configuración de Seguridad y Base de Datos
-const SECRET_KEY = 'stockmaster_jwt_secret_key';
+// S1: Conexión mediante variables de entorno
 const pool = new Pool({
-    user: 'postgres', 
-    host: 'localhost',
-    database: 'StockMaster',
-    password: 'duoc',
-    port: 5432,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  host: process.env.DB_HOST,
+  port: process.env.DB_PORT,
+  database: process.env.DB_DATABASE,
 });
 
-// Configuración de Transporte SMTP (HU-05) - Modo simulador / prueba
-const transporter = nodemailer.createTransport({
-    host: 'smtp.ethereal.email',
-    port: 587,
-    auth: {
-        user: 'stockmaster_alerts@duocuc.cl',
-        pass: 'demo_password'
-    }
-});
+// Middleware JWT con algoritmo estricto
+const verificarToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Acceso no autorizado' });
 
-// Función de despacho de correo de alerta
-async function despacharAlertaStock(producto) {
-    try {
-        const mailOptions = {
-            from: '"StockMaster Alertas" <alertas@stockmaster.cl>',
-            to: 'administracion@pyme.cl',
-            subject: `⚠️ ALERTA CRÍTICA DE STOCK: ${producto.nombre}`,
-            html: `
-                <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #dc3545; border-radius: 8px;">
-                    <h2 style="color: #dc3545;">Quiebre Preventivo de Stock</h2>
-                    <p>El producto <strong>${producto.nombre}</strong> ha alcanzado un umbral crítico de abastecimiento.</p>
-                    <ul>
-                        <li><strong>Stock actual:</strong> ${producto.stock_actual} unidades</li>
-                        <li><strong>Stock mínimo requerido:</strong> ${producto.stock_minimo} unidades</li>
-                    </ul>
-                    <hr style="border: 0; border-top: 1px solid #ccc;" />
-                    <h3>Datos de Contacto del Proveedor para Reposición Urgente:</h3>
-                    <ul>
-                        <li><strong>Proveedor:</strong> ${producto.nombre_proveedor || 'No especificado'}</li>
-                        <li><strong>Email:</strong> ${producto.email_proveedor || 'Sin correo registrado'}</li>
-                        <li><strong>Teléfono de contacto:</strong> ${producto.telefono_proveedor || '+56 9 8765 4321'}</li>
-                    </ul>
-                    <p style="font-size: 11px; color: #6c757d;">Notificación automática despachada por Sistema StockMaster.</p>
-                </div>
-            `
-        };
-        console.log(`[ALERTA EMAIL EMITIDA] Despachando notificación para ${producto.nombre}`);
-        // transporter.sendMail(mailOptions); // Activo en entorno con SMTP disponible
-    } catch (err) {
-        console.error('[ERROR SMTP] Falla en emisión de alerta:', err.message);
-    }
-}
-
-// Middleware de Protección de Rutas por Token JWT
-const autenticarToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
-        return res.status(401).json({ success: false, message: 'Acceso no autorizado: Token no proporcionado' });
-    }
-
-    jwt.verify(token, SECRET_KEY, (err, user) => {
-        if (err) return res.status(403).json({ success: false, message: 'Token inválido o expirado' });
-        req.user = user;
-        next();
-    });
+  jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] }, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Token inválido o expirado' });
+    req.user = user;
+    next();
+  });
 };
 
-// ==========================================
-// ENDPOINTS DE LA API RESTFUL
-// ==========================================
-
-// Endpoint Login (HU-02: Conexión Real a PostgreSQL con Bcrypt)
-// Endpoint Login Robusto y Seguro (HU-02)
+// S2 y S5: Login seguro sin texto plano y con mensaje unificado
 app.post('/api/login', async (req, res) => {
-    const { username, password } = req.body;
-    console.log(`[LOGIN INTENTO] Usuario recibido: "${username}"`);
+  const { username, password } = req.body;
+  try {
+    const result = await pool.query(
+      'SELECT id_usuario, username, password, rol FROM usuarios WHERE username = $1',
+      [username]
+    );
 
-    try {
-        const result = await pool.query('SELECT * FROM usuarios WHERE username = $1', [username]);
-        
-        if (result.rows.length === 0) {
-            console.log('[LOGIN ERROR] Usuario no existe en la tabla usuarios.');
-            return res.status(401).json({ success: false, message: 'Usuario no encontrado' });
-        }
-
-        const usuario = result.rows[0];
-        
-        // Verifica con bcrypt o coincidencia directa de respaldo
-        let match = false;
-        try {
-            match = await bcrypt.compare(password, usuario.password);
-        } catch (e) {
-            match = false;
-        }
-
-        // Respaldo por si se guardó en texto plano en la BD
-        if (!match && password === usuario.password) {
-            match = true;
-        }
-
-        if (match) {
-            console.log(`[LOGIN ÉXITO] Sesión autorizada para: ${usuario.username} (${usuario.rol})`);
-            const token = jwt.sign(
-                { id: usuario.id_usuario, username: usuario.username, rol: usuario.rol }, 
-                SECRET_KEY, 
-                { expiresIn: '2h' }
-            );
-            return res.json({ success: true, token: token, role: usuario.rol });
-        } else {
-            console.log('[LOGIN ERROR] Contraseña incorrecta.');
-            return res.status(401).json({ success: false, message: 'Contraseña incorrecta' });
-        }
-    } catch (error) {
-        console.error('[ERROR CONEXIÓN BD]:', error.message);
-        res.status(500).json({ success: false, message: error.message });
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
     }
+
+    const user = result.rows[0];
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id_usuario, username: user.username, rol: user.rol },
+      process.env.JWT_SECRET,
+      { expiresIn: '2h', algorithm: 'HS256' }
+    );
+
+    res.json({ token, user: { username: user.username, rol: user.rol } });
+  } catch (error) {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
 });
 
-// Endpoint Registrar Movimiento con Triggers y Alertas (HU-03 y HU-05)
-app.post('/api/movimientos', autenticarToken, async (req, res) => {
-    const { id_producto, tipo_movimiento, cantidad } = req.body;
-    try {
-        // Inserción atómica evaluada por el Trigger PL/pgSQL
-        const result = await pool.query(
-            'INSERT INTO movimientos (id_producto, tipo_movimiento, cantidad) VALUES ($1, $2, $3) RETURNING *',
-            [id_producto, tipo_movimiento, cantidad]
-        );
+// F4: Validación de tipos y parámetros en movimientos
+app.post('/api/movimientos', verificarToken, async (req, res) => {
+  const { id_producto, tipo_movimiento, cantidad } = req.body;
+  const parsedId = parseInt(id_producto, 10);
+  const parsedCant = parseInt(cantidad, 10);
 
-        // Si fue una SALIDA, evaluar inmediatamente si cruzó el stock mínimo (HU-05)
-        if (tipo_movimiento === 'SALIDA') {
-            const checkQuery = await pool.query(
-                `SELECT p.nombre, p.stock_actual, p.stock_minimo, prov.nombre AS nombre_proveedor, 
-                        prov.email_contacto AS email_proveedor, prov.telefono AS telefono_proveedor 
-                 FROM productos p 
-                 LEFT JOIN proveedores prov ON p.id_proveedor = prov.id_proveedor 
-                 WHERE p.id_producto = $1`, 
-                [id_producto]
-            );
-            
-            if (checkQuery.rows.length > 0) {
-                const prod = checkQuery.rows[0];
-                if (prod.stock_actual <= prod.stock_minimo) {
-                    await despacharAlertaStock(prod);
-                }
-            }
-        }
+  if (isNaN(parsedId) || isNaN(parsedCant) || parsedCant <= 0 || !['ENTRADA', 'SALIDA'].includes(tipo_movimiento)) {
+    return res.status(400).json({ error: 'Parámetros de movimiento inválidos' });
+  }
 
-        res.json({ success: true, movimiento: result.rows[0] });
-    } catch (error) {
-        // Excepción personalizada P0001 desde el disparador PL/pgSQL
-        if (error.code === 'P0001') { 
-            return res.status(400).json({ success: false, message: error.message });
+  try {
+    await pool.query(
+      'INSERT INTO movimientos (id_producto, tipo_movimiento, cantidad) VALUES ($1, $2, $3)',
+      [parsedId, tipo_movimiento, parsedCant]
+    );
+
+    // F2: Registro formal de alerta en servidor (Simulación arquitectónica documentada)
+    if (tipo_movimiento === 'SALIDA') {
+      const prodCheck = await pool.query('SELECT stock_actual, stock_minimo, nombre FROM productos WHERE id_producto = $1', [parsedId]);
+      if (prodCheck.rows.length > 0) {
+        const p = prodCheck.rows[0];
+        if (p.stock_actual <= p.stock_minimo) {
+          console.info(`[ALERTA STOCK] Producto "${p.nombre}" bajo stock mínimo (${p.stock_actual}/${p.stock_minimo}).`);
         }
-        res.status(500).json({ success: false, message: 'Error interno del servidor' });
+      }
     }
+
+    res.status(201).json({ mensaje: 'Movimiento registrado con éxito' });
+  } catch (error) {
+    if (error.code === 'P0001') {
+      return res.status(400).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Error al procesar el movimiento' });
+  }
 });
 
-// Endpoint Predicción de Reposición (HU-04)
-app.get('/api/prediccion', autenticarToken, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM vista_prediccion_reposicion ORDER BY dias_autonomia ASC');
-        res.json({ success: true, data: result.rows });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
+app.get('/api/prediccion', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM vista_prediccion_reposicion ORDER BY dias_autonomia ASC');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Error al consultar la vista predictiva' });
+  }
 });
 
-app.listen(3000, () => console.log('Servidor StockMaster Unificado corriendo en puerto 3000'));
+app.listen(PORT, () => {
+  console.log(`Servidor StockMaster operativo en el puerto ${PORT}`);
+});
