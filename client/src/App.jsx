@@ -2,24 +2,48 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
 function App() {
-  const [token, setToken] = useState(null);
-  const [loginForm, setLoginForm] = useState({ username: 'admin', password: 'admin123' });
+  // M6: Inicializar el token desde sessionStorage para mantener sesión activa
+  const [token, setToken] = useState(sessionStorage.getItem('stockmaster_token') || null);
+  
+  // S3: Campos limpios sin credenciales precargadas en el código
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   
   const [productos, setProductos] = useState([]);
   const [mensaje, setMensaje] = useState({ texto: '', tipo: '' });
   const [movimiento, setMovimiento] = useState({ id_producto: '', tipo_movimiento: 'ENTRADA', cantidad: 1 });
+
+  // Cargar predicciones automáticamente al recargar si ya hay token guardado
+  useEffect(() => {
+    if (token) {
+      cargarPredicciones(token);
+    }
+  }, [token]);
 
   // === LOGICA SPRINT 1 (LOGIN HU-02) ===
   const manejarLogin = async (e) => {
     e.preventDefault();
     try {
       const res = await axios.post('http://localhost:3000/api/login', loginForm);
-      if (res.data.success) {
-        setToken(res.data.token);
-        cargarPredicciones(res.data.token);
+      const tokenRecibido = res.data.token || (res.data.data && res.data.data.token);
+
+      if (tokenRecibido) {
+        sessionStorage.setItem('stockmaster_token', tokenRecibido);
+        setToken(tokenRecibido);
+        cargarPredicciones(tokenRecibido);
+      } else {
+        alert("El servidor respondió pero no entregó un token válido.");
       }
     } catch (error) {
-      alert("Credenciales incorrectas o usuario no encontrado en base de datos.");
+      console.error("Detalle del error en login:", error);
+      if (error.response) {
+        // El servidor respondió con un código de error (400, 401, 500)
+        alert(`Error del servidor (${error.response.status}): ${JSON.stringify(error.response.data)}`);
+      } else if (error.request) {
+        // La petición salió pero el servidor no respondió (servidor apagado o CORS)
+        alert("No se pudo conectar con el servidor backend en http://localhost:3000. Revisa que 'npm start' esté corriendo.");
+      } else {
+        alert(`Error de configuración: ${error.message}`);
+      }
     }
   };
 
@@ -29,7 +53,9 @@ function App() {
       const res = await axios.get('http://localhost:3000/api/prediccion', {
         headers: { Authorization: `Bearer ${jwtToken}` }
       });
-      if (res.data.success) setProductos(res.data.data);
+      // Acepta la estructura si viene directa como array o envuelta en data
+      const data = Array.isArray(res.data) ? res.data : (res.data.data || []);
+      setProductos(data);
     } catch (error) {
       console.error("Error al cargar predicciones:", error);
     }
@@ -40,21 +66,22 @@ function App() {
     setMensaje({ texto: '', tipo: '' });
     try {
       const res = await axios.post('http://localhost:3000/api/movimientos', {
-        id_producto: parseInt(movimiento.id_producto),
+        id_producto: parseInt(movimiento.id_producto, 10),
         tipo_movimiento: movimiento.tipo_movimiento,
-        cantidad: parseInt(movimiento.cantidad)
+        cantidad: parseInt(movimiento.cantidad, 10)
       }, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (res.data.success) {
+      if (res.status === 201 || res.data.success) {
         setMensaje({ texto: 'Movimiento registrado con éxito en base de datos.', tipo: 'exito' });
         cargarPredicciones(token);
       }
     } catch (error) {
       // Captura del código HTTP 400 emitido ante la excepción P0001 del Trigger SQL
       if (error.response && error.response.status === 400) {
-        setMensaje({ texto: error.response.data.message, tipo: 'error' });
+        const errorMsg = error.response.data.error || error.response.data.message || 'Error en validación de stock.';
+        setMensaje({ texto: errorMsg, tipo: 'error' });
       } else {
         setMensaje({ texto: 'Error de servidor o sesión expirada.', tipo: 'error' });
       }
@@ -62,9 +89,11 @@ function App() {
   };
 
   const cerrarSesion = () => {
+    sessionStorage.removeItem('stockmaster_token');
     setToken(null);
     setProductos([]);
     setMensaje({ texto: '', tipo: '' });
+    setLoginForm({ username: '', password: '' });
   };
 
   // === VISTA DE LOGIN ===
@@ -163,13 +192,13 @@ function App() {
                 <tr key={prod.id_producto} style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: prod.stock_actual <= prod.stock_minimo ? '#fff1f2' : 'transparent' }}>
                   <td style={{ padding: '10px' }}>
                     <strong>{prod.nombre}</strong><br/>
-                    <small style={{ color: '#64748b' }}>Prov: {prod.nombre_proveedor || 'N/A'}</small>
+                    <small style={{ color: '#64748b' }}>Prov: {prod.proveedor || prod.nombre_proveedor || 'N/A'}</small>
                   </td>
                   <td style={{ padding: '10px', fontWeight: 'bold', color: prod.stock_actual <= prod.stock_minimo ? '#e11d48' : '#0f172a' }}>
                     {prod.stock_actual}
                   </td>
                   <td style={{ padding: '10px' }}>{prod.stock_minimo}</td>
-                  <td style={{ padding: '10px' }}>{prod.salidas_ultimo_mes}</td>
+                  <td style={{ padding: '10px' }}>{prod.salidas_mes ?? prod.salidas_ultimo_mes ?? 0}</td>
                   <td style={{ padding: '10px' }}>
                     {prod.dias_autonomia === 999 ? (
                       <span style={{ color: '#64748b' }}>Sin rotación</span>
