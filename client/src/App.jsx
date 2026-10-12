@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
+// M5: URL base dinámica mediante variable de entorno Vite con respaldo local
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+
 function App() {
   // M6: Inicializar el token desde sessionStorage para mantener sesión activa
   const [token, setToken] = useState(sessionStorage.getItem('stockmaster_token') || null);
@@ -23,7 +26,7 @@ function App() {
   const manejarLogin = async (e) => {
     e.preventDefault();
     try {
-      const res = await axios.post('http://localhost:3000/api/login', loginForm);
+      const res = await axios.post(`${API_URL}/login`, loginForm);
       const tokenRecibido = res.data.token || (res.data.data && res.data.data.token);
 
       if (tokenRecibido) {
@@ -36,11 +39,10 @@ function App() {
     } catch (error) {
       console.error("Detalle del error en login:", error);
       if (error.response) {
-        // El servidor respondió con un código de error (400, 401, 500)
-        alert(`Error del servidor (${error.response.status}): ${JSON.stringify(error.response.data)}`);
+        const errorMsg = error.response.data?.error || 'Credenciales inválidas';
+        alert(`Error (${error.response.status}): ${errorMsg}`);
       } else if (error.request) {
-        // La petición salió pero el servidor no respondió (servidor apagado o CORS)
-        alert("No se pudo conectar con el servidor backend en http://localhost:3000. Revisa que 'npm start' esté corriendo.");
+        alert("No se pudo conectar con el servidor backend. Revisa que el servicio esté activo.");
       } else {
         alert(`Error de configuración: ${error.message}`);
       }
@@ -50,14 +52,17 @@ function App() {
   // === LOGICA SPRINT 2 Y 3 (INVENTARIO Y PREDICCIÓN CON BEARER JWT) ===
   const cargarPredicciones = async (jwtToken = token) => {
     try {
-      const res = await axios.get('http://localhost:3000/api/prediccion', {
+      const res = await axios.get(`${API_URL}/prediccion`, {
         headers: { Authorization: `Bearer ${jwtToken}` }
       });
-      // Acepta la estructura si viene directa como array o envuelta en data
       const data = Array.isArray(res.data) ? res.data : (res.data.data || []);
       setProductos(data);
     } catch (error) {
       console.error("Error al cargar predicciones:", error);
+      if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+        cerrarSesion();
+        alert("Su sesión ha expirado o el token no es válido. Inicie sesión nuevamente.");
+      }
     }
   };
 
@@ -65,7 +70,7 @@ function App() {
     e.preventDefault();
     setMensaje({ texto: '', tipo: '' });
     try {
-      const res = await axios.post('http://localhost:3000/api/movimientos', {
+      const res = await axios.post(`${API_URL}/movimientos`, {
         id_producto: parseInt(movimiento.id_producto, 10),
         tipo_movimiento: movimiento.tipo_movimiento,
         cantidad: parseInt(movimiento.cantidad, 10)
@@ -78,12 +83,15 @@ function App() {
         cargarPredicciones(token);
       }
     } catch (error) {
-      // Captura del código HTTP 400 emitido ante la excepción P0001 del Trigger SQL
+      // Captura del código HTTP 400 emitido ante la excepción P0001 del Trigger SQL o validación
       if (error.response && error.response.status === 400) {
-        const errorMsg = error.response.data.error || error.response.data.message || 'Error en validación de stock.';
+        const errorMsg = error.response.data?.error || error.response.data?.message || 'Error en validación de stock.';
         setMensaje({ texto: errorMsg, tipo: 'error' });
+      } else if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+        cerrarSesion();
+        alert("Sesión expirada. Por favor ingrese sus credenciales nuevamente.");
       } else {
-        setMensaje({ texto: 'Error de servidor o sesión expirada.', tipo: 'error' });
+        setMensaje({ texto: 'Error de servidor al registrar movimiento.', tipo: 'error' });
       }
     }
   };
